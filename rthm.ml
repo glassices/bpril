@@ -286,7 +286,6 @@ module Rthm : Rthm_kernel = struct
     (* match c1 and c2 and every asl1 into asl2 *)
     let const_ty = ftnamer rth2 and const_var = fvnamer rth2 in
     let avoid = union (fvnamer rth1) const_var in
-    print_endline "start";
     let unfl = hol_unify avoid const_ty const_var ((c1,c2)::(flex1 @ flex2)) rsl1 in
     let augment tm1 tm2 ((ins,flex,rsl) : unifier) : unifier list =
       let tm1 = inst_term ins tm1 and tm2 = inst_term ins tm2 in
@@ -417,3 +416,4 @@ let r91 = el 4 (rdeduct r62 r90);;
 let r442 = el 1 (rdeduct assume r91);;
 let r443 = el 0 (req_mp r442 assume);;
 let r444 = el 0 (req_mp r443 r439);;
+let r449 = rdeduct r444 r448;
