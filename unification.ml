@@ -12,6 +12,22 @@ let safe_tyins i theta =
 let safe_tmins i theta =
   map (fun (a,b) -> beta_eta_term (vsubst [i] a),b) theta;;
 
+let ss_term tm =
+  let s = string_of_term tm in
+  let ls = map (fun x -> if x = "\n" then " " else x) (explode s) in
+  let rec work ls =
+    match ls with
+      a::(b::t) -> if a = " " then
+                     if b = " " then work (b::t)
+                     else a::b::(work t)
+                   else a::(work (b::t))
+    | _ -> ls in
+  String.concat "" (work ls);;
+
+let merge_ins (tyins1,tmins1) (tyins2,tmins2) =
+  itlist safe_tyins tyins2 tyins1,
+  itlist safe_tmins tmins2 (pmap (inst tyins2) tmins1);;
+
 (* DONE CHECKING *)
 let type_unify (const_ty : string list) =
   let is_free_ty ty =
@@ -149,15 +165,42 @@ let hol_unify (avoid : string list) (const_ty : string list) (const_var : string
 
   let is_free_var v = is_var v && not (mem (name_of v) const_var) && not (has_prefix (name_of v) "mc") in
 
+  let quick_test =
+    let rec work tm1 env tm2 =
+      if tm_size tm1 > tm_size tm2 then true
+      else if alphaorder tm1 tm2 = 0 then false
+      else (
+        match tm2 with
+          Abs(v,bod) -> work tm1 (v::env) bod
+        | Comb(_,_) -> let _,(hs,args) = decompose tm2 in
+                       if is_const hs || mem hs env || (mem (name_of hs) const_var) || (has_prefix (name_of hs) "mc") then
+                         forall (work tm1 env) args
+                       else true
+        | _ -> true
+      ) in
+
+    fun (tm1,tm2) ->
+      if head_free tm1 && not (head_free tm2) then work tm1 [] tm2
+      else true in
+
+  (*
+  let preprocess obj rsl (tyins,tmins) =
+    (* do every preprocessing before imitation and projection *)
+    let obj = pmap beta_eta_term obj in
+    let obj = map bound_eta_norm obj in
+    let rsl = map beta_eta_term rsl in
+    let rsl = map remove_dummy_bvar rsl in
+  *)
+
   (* each pair of obj must have matched type *)
   let rec work dep avoid (obj : (term * term) list) (rsl : term list) (tyins,tmins) sofar : unifier list =
-    if exists (fun (a,b) -> (tm_size a) >= 50) tmins then sofar else
-    if exists (fun (a,b) -> (tm_size a) >= 50 || (tm_size b) >= 50) obj then sofar else (
+    if exists (fun (a,b) -> (tm_size a) >= 100) tmins then sofar else
+    if exists (fun (a,b) -> (tm_size a) >= 100 || (tm_size b) >= 100) obj then sofar else (
     (* check maximum depth *)
     (*
     List.iter (fun (u,v) -> Printf.printf "0\t%d\t%d\n%!" (tm_size u) (tm_size v)) obj;
     *)
-    if dep >= 10 then sofar else
+    if dep >= 25 then sofar else
     (* step 0: beta-eta normalization and kill extra bvars *)
     let obj = pmap beta_eta_term obj in
     let obj = map bound_eta_norm obj in
@@ -173,14 +216,19 @@ let hol_unify (avoid : string list) (const_ty : string list) (const_var : string
     with Failure "pop" ->
     (* step D: remove all identical pairs *)
     (*
-    List.iter (fun (u,v) -> Printf.printf "1\t%s\t\t\t%s\n%!" (string_of_term u) (string_of_term v)) obj;
-    List.iter (fun (u,v) -> Printf.printf "1\t%s\t\t\t%s\n%!" (string_of_type (type_of u)) (string_of_type (type_of v))) obj;
+    printf "%d\n%!" (length obj);
+    List.iter (fun (u,v) -> Printf.printf "1\t%s\t\t\t%s\n%!" (ss_term u) (ss_term v)) obj;
     print_endline "";
     *)
+    let obj = List.sort_uniq Pervasives.compare obj in
     let obj = filter (fun (u,v) -> alphaorder u v <> 0) obj in
     (* step O: swap all bound-free pairs *)
     let obj = map (fun (u,v) -> if is_free_var v || not (head_free u) && head_free v then (v,u)
                                 else (u,v)) obj in
+    (* quick test *)
+    (*
+    if not (forall quick_test obj) then sofar else
+    *)
     (* step V: try to find FV-term pair *)
     try let (fv,tm),obj = pop (fun (u,v) -> is_free_var u && not (vfree_in u v)) obj in
         let tmins = safe_tmins (tm,fv) tmins in
@@ -219,7 +267,9 @@ let hol_unify (avoid : string list) (const_ty : string list) (const_var : string
               let args = map (fun ty -> mk_lcomb (mk_var(new_name avoid,mk_fun(tyl1,ty))) bvars) tyl2 in
               let tm = mk_term bvars (mk_lcomb hs2 args) in
               let tmins' = safe_tmins (tm,hs1) tmins in
-              work (dep+1) avoid (pmap (vsubst [tm,hs1]) obj) (map (vsubst [tm,hs1]) rsl) (tyins,tmins') sofar
+              (* TODO check this heuristic *)
+              let offset = if vfree_in hs1 tm2 then 1 else 0 in
+              work (dep+offset) avoid (pmap (vsubst [tm,hs1]) obj) (map (vsubst [tm,hs1]) rsl) (tyins,tmins') sofar
             else sofar in
           (* step T_P and P: projection *)
           let tyl1,apx1 = dest_fun (type_of hs1) in

@@ -22,6 +22,7 @@ module type Rthm_kernel =
     val rrsl : rthm -> term list
     val ftnamer : rthm -> string list
     val fvnamer : rthm -> string list
+    val rfvars : rthm -> term list
     
     val rinst : instor -> rthm -> rthm list
     val rnormalize : rthm -> string -> string -> rthm
@@ -100,6 +101,10 @@ module Rthm : Rthm_kernel = struct
     let flex1,flex2 = unzip flex in
     fvnamel ((c::asl) @ flex1 @ flex2 @ rsl)
 
+  let rfvars (Rhythm(asl,c,flex,rsl,_)) =
+    let flex1,flex2 = unzip flex in
+    freesl ((c::asl) @ flex1 @ flex2 @ rsl)
+
   let distill (asl,c,flex,rsl,invoke) =
     (* flex-flex pairs are broken and need further unification,
      * however, distillation might output multiple rthms
@@ -118,6 +123,20 @@ module Rthm : Rthm_kernel = struct
              failwith "distill[fatal]: thm has more assumptions than rthm"
              (* TODO check th is identical to thm *)
            else asl,c,[],[],fun insl -> conv_thm beta_eta_conv (rev_itlist inst_thm insl th)) raws in
+    (* check get_rthm works *)
+    do_list (fun (asl,c,flex,rsl,invoke) ->
+      let flex1,flex2 = unzip flex in
+      let fvars = freesl ((c::asl) @ flex1 @ flex2 @ rsl) in
+      let fvars = filter (fun v -> not (has_prefix (name_of v) "mc")) fvars in
+      let constantize v =
+        let tyl,apex = dest_fun (type_of v) in
+        let bvs = List.mapi (fun i ty -> mk_var("u" ^ (string_of_int i),ty)) tyl in
+        let hs = mk_var("fdq",apex) in
+        mk_term bvs hs in
+      let tmins = map (fun v -> (constantize v),v) fvars in
+      try let _ = invoke [[],tmins] in ()
+      with Failure s -> (print_endline s; failwith "distill[fatal]: can't invoke thm")
+    ) raws;
     map (fun (asl,c,flex,rsl,invoke) -> Rhythm(asl,c,flex,rsl,invoke)) raws
 
   let rinst ins (Rhythm(asl,c,flex,rsl,invoke)) =
@@ -200,7 +219,7 @@ module Rthm : Rthm_kernel = struct
               rhs c1,flex,rsl,
               fun insl -> EQ_MP (invoke1 (ins::insl)) (invoke2 (ins::insl))) in
 
-    let ninfer (Rhythm(asl1,c1,_,_,invoke1)) (Rhythm(asl2,_,_,_,invoke2)) ((tyins,_) as ins,flex,rsl) =
+    let ninfer (Rhythm(asl1,c1,_,_,invoke1)) (Rhythm(asl2,_,_,_,invoke2) as rth2) ((tyins,_) as ins,flex,rsl) =
       let c1 = beta_eta_term (inst_term ins c1) in
       let mvar = mk_var("mc",type_subst tyins `:C`) in
       distill(map (inst_term ins) (asl1 @ asl2),
@@ -233,7 +252,7 @@ module Rthm : Rthm_kernel = struct
       let c1 = beta_eta_term (inst_term ins c1) and c2 = beta_eta_term (inst_term ins c2) in
       distill(map (inst_term ins) (asl1 @ asl2),
               mk_eq(mk_comb(lhs c1,lhs c2),mk_comb(rhs c1,rhs c2)),flex,rsl,
-              fun insl -> MK_COMB (invoke1 (ins::insl),invoke2 (ins::insl))) in
+              fun insl -> conv_thm beta_eta_conv (MK_COMB (invoke1 (ins::insl),invoke2 (ins::insl)))) in
 
     let rth1 = rnormalize rth1 "x" "A" and rth2 = rnormalize rth2 "y" "B" in
     let tm1 = mk_eq(`p:C->D`,`q:C->D`) and tm2 = mk_eq(`u:C`,`v:C`) in
@@ -280,18 +299,34 @@ module Rthm : Rthm_kernel = struct
 
   (* Some utilities *)
   let rmatchable rth1 rth2 =
+    let rec cmap f l1 l2 =
+      match l1 with
+        h::t -> (map (f h) l2) @ (cmap f t l2)
+      | [] -> [] in
+
+    let update ins0 (ins,flex,rsl) =
+      (merge_ins ins0 ins),flex,rsl in
+
     if length (rrsl rth2) > 0 then failwith "rmatchable[fatal]: rsl2 must be empty" else
     let rth1 = rnormalize rth1 "x" "A" and rth2 = rnormalize rth2 "y" "B" in
     let asl1,c1,flex1,rsl1 = dest_rthm rth1 and asl2,c2,flex2,_ = dest_rthm rth2 in
     (* match c1 and c2 and every asl1 into asl2 *)
     let const_ty = ftnamer rth2 and const_var = fvnamer rth2 in
     let avoid = union (fvnamer rth1) const_var in
+    let ins0 = ([],map (fun v -> v,v) (rfvars rth1)) in
     let unfl = hol_unify avoid const_ty const_var ((c1,c2)::(flex1 @ flex2)) rsl1 in
+    let unfl = map (update ins0) unfl in
     let augment tm1 tm2 ((ins,flex,rsl) : unifier) : unifier list =
       let tm1 = inst_term ins tm1 and tm2 = inst_term ins tm2 in
-      hol_unify avoid const_ty const_var ((tm1,tm2)::flex) rsl in
-    let unfl = itlist (fun tm1 unfl -> List.concat (map (fun tm2 -> List.concat (map (fun unf -> augment tm1 tm2 unf) unfl)) asl2))
+      let unfl = hol_unify avoid const_ty const_var ((tm1,tm2)::flex) rsl in
+      map (update ins) unfl in
+    let unfl = itlist (fun tm1 unfl -> List.concat (cmap (fun tm2 unf -> augment tm1 tm2 unf) asl2 unfl))
                       asl1 unfl in
+    (* check *)
+    do_list (fun (ins,_,_) ->
+      try let _ = get_rthm rth1 [ins] in ()
+      with Failure s -> (print_endline s; failwith "rmatchable[fatal]: cant get_rthm from unfl")
+    ) unfl;
     length unfl > 0
 
 end;;
@@ -354,66 +389,3 @@ let pp_print_rthm fmt rth =
 let print_rthm = pp_print_rthm std_formatter;;
 #install_printer print_rthm;;
 
-let T_TAUT = DEDUCT_ANTISYM_RULE (ASSUME `t:bool`) TRUTH;;
-let refl = mk_rthm (REFL `x`);;
-let assume = mk_rthm (ASSUME `x:bool`);;
-let t_def = mk_rthm T_DEF;;
-let and_def = mk_rthm AND_DEF;;
-let t_taut = mk_rthm(T_TAUT);;
-let r0 = mk_rthm(T_DEF);;
-let r4 = el 0 (rmk_comb refl r0);;
-let r5 = el 0 (rmk_comb r4 refl);;
-let r6 = el 1 (req_mp r5 refl);;
-let r7 = el 1 (req_mp r6 refl);;
-let r18 = mk_rthm(AND_DEF);;
-let r93 = el 0 (rmk_comb r18 refl);;
-let r100 = el 0 (rmk_comb r93 refl);;
-let r107 = el 0 (req_mp r100 assume);;
-let r109 = el 0 (rmk_comb r107 refl);;
-let r136 = el 0 (rmk_comb refl r109);;
-let r137 = el 0 (rmk_comb r136 refl);;
-let r138 = el 2 (req_mp r137 refl);;
-let r139 = el 0 (req_mp r138 r7);;
-let r4725 = el 1 (rdeduct assume r139);;
-let r4726 = el 0 (req_mp r4725 assume);;
-let r491 = r4725;;
-let r492 = r4726;;
-let r447 = r491;;
-let r448 = r492;;
-let r421 = mk_rthm(FORALL_DEF);;
-let r424 = el 0 (rmk_comb r421 refl);;
-let r425 = el 0 (req_mp r424 assume);;
-let r429 = el 0 (rmk_comb r425 refl);;
-let r436 = el 0 (rmk_comb refl r429);;
-let r437 = el 0 (rmk_comb r436 refl);;
-let r438 = el 3 (req_mp r437 refl);;
-let r439 = el 0 (req_mp r438 r7);;
-let r9 = mk_rthm(T_TAUT);;
-let r13 = el 0 (rmk_comb refl assume);;
-let r14 = el 0 (rmk_comb r13 refl);;
-let r15 = el 2 (req_mp r14 refl);;
-let r16 = el 0 (req_mp r15 r7);;
-let r17 = el 2 (rdeduct r16 r9);;
-let r66 = el 0 (req_mp r17 assume);;
-let r68 = r66;;
-let r70 = el 0 (rmk_comb refl r68);;
-let r71 = el 0 (rmk_comb r70 r66);;
-let r74 = el 0 (rmk_comb r18 refl);;
-let r76 = el 0 (rmk_comb r74 refl);;
-let r87 = el 0 (rmk_comb refl r76);;
-let r88 = el 0 (rmk_comb r87 refl);;
-let r89 = el 1 (req_mp r88 refl);;
-let r90 = el 4 (req_mp r89 r71);;
-let r20 = el 0 (rmk_comb r18 refl);;
-let r26 = el 0 (rmk_comb r20 refl);;
-let r32 = el 0 (req_mp r26 assume);;
-let r34 = el 0 (rmk_comb r32 refl);;
-let r59 = el 0 (rmk_comb refl r34);;
-let r60 = el 0 (rmk_comb r59 refl);;
-let r61 = el 2 (req_mp r60 refl);;
-let r62 = el 1 (req_mp r61 r7);;
-let r91 = el 4 (rdeduct r62 r90);;
-let r442 = el 1 (rdeduct assume r91);;
-let r443 = el 0 (req_mp r442 assume);;
-let r444 = el 0 (req_mp r443 r439);;
-let r449 = rdeduct r444 r448;
