@@ -105,39 +105,105 @@ module Rthm : Rthm_kernel = struct
     let flex1,flex2 = unzip flex in
     freesl ((c::asl) @ flex1 @ flex2 @ rsl)
 
-  let distill (asl,c,flex,rsl,invoke) =
-    (* flex-flex pairs are broken and need further unification,
-     * however, distillation might output multiple rthms
-     *)
-    (* Step I: fix broken flex-flex pairs *)
-    let unfs = hol_unify (fvnamel (c::asl)) [] [] flex rsl in
-    let raws = map (fun (ins,flex,rsl) ->
-      List.sort_uniq alphaorder (map (beta_eta_term o (inst_term ins)) asl),
-      beta_eta_term (inst_term ins c),flex,rsl,
-      fun insl -> invoke (ins::insl)) unfs in
-    (* Step II: fix trivial invoker *)
-    let raws = map (fun (asl,c,flex,rsl,invoke) ->
-      if length flex > 0 || length rsl > 0 then asl,c,flex,rsl,invoke
-      else let th = invoke [] in
-           if length (hyp th) > length asl then
-             failwith "distill[fatal]: thm has more assumptions than rthm"
-             (* TODO check th is identical to thm *)
-           else asl,c,[],[],fun insl -> conv_thm beta_eta_conv (rev_itlist inst_thm insl th)) raws in
-    (* check get_rthm works *)
-    do_list (fun (asl,c,flex,rsl,invoke) ->
-      let flex1,flex2 = unzip flex in
-      let fvars = freesl ((c::asl) @ flex1 @ flex2 @ rsl) in
-      let fvars = filter (fun v -> not (has_prefix (name_of v) "mc")) fvars in
-      let constantize v =
-        let tyl,apex = dest_fun (type_of v) in
-        let bvs = List.mapi (fun i ty -> mk_var("u" ^ (string_of_int i),ty)) tyl in
-        let hs = mk_var("fdq",apex) in
-        mk_term bvs hs in
-      let tmins = map (fun v -> (constantize v),v) fvars in
-      try let _ = invoke [[],tmins] in ()
-      with Failure s -> (print_endline s; failwith "distill[fatal]: can't invoke thm")
-    ) raws;
-    map (fun (asl,c,flex,rsl,invoke) -> Rhythm(asl,c,flex,rsl,invoke)) raws
+  let distill =
+    let rec rev_update lst (b,a) =
+      match lst with
+        (b',a')::t -> if Pervasives.compare a' a = 0 then (b,a)::t
+                      else (b',a')::(rev_update t (b,a))
+      | [] -> [] in
+
+    let rec convert sofar : (term * term) list =
+      match sofar with
+        (lst,v)::t -> if exists (fun x -> x <> None) lst then (
+                        let tyl,apex = dest_fun (type_of v) in
+                        let n = length tyl in
+                        let bvars = map (fun i -> let name = "u" ^ (string_of_int (i+1)) in
+                                                  let name = if name = (name_of v) then name ^ "'" else name in
+                                                  mk_var(name,el i tyl)) (0--(n-1)) in
+                        let bvars' = filter (fun (i,bvar) -> i >= (length lst) || (el i lst) = None) (zip (0--(n-1)) bvars) in
+                        let args = snd (unzip bvars') in
+                        let ty = mk_fun(map type_of args,apex) in
+                        let tm = eta_term (mk_term bvars (mk_lcomb (mk_var(name_of v,ty)) args)) in
+                        (tm,v)::(convert t)
+                      ) else convert t
+      | [] -> [] in
+
+    (* can be optimized to linear *)
+    let rec dup_check env tm sofar =
+      match tm with
+        Abs(v,bod) -> dup_check (v::env) bod sofar
+      | _ -> let hs,args = strip_comb tm in
+             let sofar = itlist (fun tm sofar -> dup_check env tm sofar) args sofar in
+             if not (mem hs env) && not (is_const hs) && not (has_prefix (name_of hs) "mc") then (
+               try let lst = rev_assoc hs sofar in
+                   let n = min (length lst) (length args) in
+                   let lst = map (fun i -> let a = el i lst and b = el i args in
+                                           match a with
+                                             Some tm -> let fvars = frees b in
+                                                        if forall (fun x -> not (mem x fvars)) env &&
+                                                           alphaorder tm b = 0 then Some tm 
+                                                        else None
+                                           | None -> None) (0--(n-1)) in
+                   rev_update sofar (lst,hs)
+               with Failure "find" ->
+                 let lst = map (fun arg -> let fvars = frees arg in
+                                           if exists (fun x -> mem x fvars) env then None
+                                           else Some arg) args in
+                 (lst,hs)::sofar
+             ) else sofar in
+
+    let rec work (asl,c,flex,rsl,invoke) =
+      (* flex-flex pairs are broken and need further unification,
+       * however, distillation might output multiple rthms
+       *)
+      (* Step I: fix broken flex-flex pairs *)
+      let unfs = hol_unify (fvnamel (c::asl)) [] [] flex rsl in
+      let raws = map (fun (ins,flex,rsl) ->
+        List.sort_uniq alphaorder (map (beta_eta_term o (inst_term ins)) asl),
+        beta_eta_term (inst_term ins c),flex,rsl,
+        fun insl -> invoke (ins::insl)) unfs in
+      (* Step II: remove dummy args *)
+      (*
+      let raws = List.concat(
+        map (fun (asl,c,flex,rsl,invoke) ->
+          let flex1,flex2 = unzip flex in
+          let sofar = itlist (fun tm sofar -> dup_check [] tm sofar) (c::(asl @ flex1 @ flex2)) [] in
+          let tmins = convert sofar in
+          if tmins = [] then [(asl,c,flex,rsl,invoke)]
+          else work (map (vsubst tmins) asl,
+                     vsubst tmins c,
+                     pmap (vsubst tmins) flex,
+                     map (vsubst tmins) rsl,
+                     fun insl -> invoke (([],tmins)::insl))) raws) in
+      *)
+      raws in
+
+    fun (asl,c,flex,rsl,invoke) ->
+      let raws = work (asl,c,flex,rsl,invoke) in
+      (* Step III: fix trivial invoker *)
+      let raws = map (fun (asl,c,flex,rsl,invoke) ->
+        if length flex > 0 || length rsl > 0 then asl,c,flex,rsl,invoke
+        else let th = invoke [] in
+             if length (hyp th) > length asl then
+               failwith "distill[fatal]: thm has more assumptions than rthm"
+               (* TODO check th is identical to thm *)
+             else asl,c,[],[],fun insl -> conv_thm beta_eta_conv (rev_itlist inst_thm insl th)) raws in
+      (* check get_rthm works *)
+      do_list (fun (asl,c,flex,rsl,invoke) ->
+        let flex1,flex2 = unzip flex in
+        let fvars = freesl ((c::asl) @ flex1 @ flex2 @ rsl) in
+        let fvars = filter (fun v -> not (has_prefix (name_of v) "mc")) fvars in
+        let constantize v =
+          let tyl,apex = dest_fun (type_of v) in
+          let bvs = List.mapi (fun i ty -> mk_var("u" ^ (string_of_int i),ty)) tyl in
+          let hs = mk_var("fdq",apex) in
+          mk_term bvs hs in
+        let tmins = map (fun v -> (constantize v),v) fvars in
+        try let _ = invoke [[],tmins] in ()
+        with Failure s -> (print_endline s; failwith "distill[fatal]: can't invoke thm")
+      ) raws;
+      map (fun (asl,c,flex,rsl,invoke) -> Rhythm(asl,c,flex,rsl,invoke)) raws
+
 
   let rinst ins (Rhythm(asl,c,flex,rsl,invoke)) =
     distill(map (inst_term ins) asl,

@@ -165,6 +165,7 @@ let hol_unify (avoid : string list) (const_ty : string list) (const_var : string
 
   let is_free_var v = is_var v && not (mem (name_of v) const_var) && not (has_prefix (name_of v) "mc") in
 
+  (*
   let quick_test =
     let rec work tm1 env tm2 =
       if tm_size tm1 > tm_size tm2 then true
@@ -182,6 +183,7 @@ let hol_unify (avoid : string list) (const_ty : string list) (const_var : string
     fun (tm1,tm2) ->
       if head_free tm1 && not (head_free tm2) then work tm1 [] tm2
       else true in
+  *)
 
   (*
   let preprocess obj rsl (tyins,tmins) =

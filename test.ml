@@ -53,9 +53,13 @@ let main() =
 
 try main()
 with Failure s -> print_endline s;;
+(*
+let rth1 = Dii.find 89 !mm;;
+let rth2 = Dii.find 71 !mm;;
+*)
+
 let refl = mk_rthm(REFL `x:A`);;
 let assume = mk_rthm(ASSUME `x:bool`);;
-let rth1 = el 2 (req_mp (hd (rmk_comb (hd (rmk_comb refl assume)) refl)) refl);;
-let rth2 = el 1 (req_mp (hd (rmk_comb refl assume)) refl);;
+let r1 = el 0 (rmk_comb refl assume);;
 
 

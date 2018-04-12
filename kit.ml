@@ -74,6 +74,8 @@ let (beta_eta_conv : conv) = (TOP_DEPTH_CONV BETA_CONV) THENC (TOP_DEPTH_CONV ET
 
 let (beta_eta_term : term -> term) = rand o concl o beta_eta_conv;;
 
+let (eta_term : term -> term) = rand o concl o eta_conv;;
+
 let conv_term (cnv : conv) = rand o concl o cnv;;
 
 (* conv the concl of a theorem *)
